@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Air Drawing App</title>
+
+  <style>
+    *{
+      margin:0;
+      padding:0;
+      box-sizing:border-box;
+      font-family:Arial, sans-serif;
+    }
+
+    body{
+      overflow:hidden;
+      background:#050505;
+      color:white;
+    }
+
+    video{
+      position:fixed;
+      right:20px;
+      bottom:20px;
+      width:240px;
+      border-radius:16px;
+      border:2px solid #222;
+      transform:scaleX(-1);
+      z-index:10;
+      opacity:0.9;
+    }
+
+    canvas{
+      position:fixed;
+      inset:0;
+      z-index:1;
+      pointer-events:none;
+    }
+
+    .ui{
+      position:fixed;
+      top:20px;
+      left:20px;
+      z-index:20;
+      background:rgba(20,20,20,0.85);
+      padding:16px;
+      border-radius:18px;
+      border:1px solid #333;
+      backdrop-filter:blur(10px);
+      width:260px;
+    }
+
+    .ui h2{
+      margin-bottom:14px;
+      font-size:20px;
+    }
+
+    .control{
+      margin-bottom:16px;
+    }
+
+    label{
+      display:block;
+      margin-bottom:8px;
+      font-size:14px;
+      color:#bbb;
+    }
+
+    input[type="color"]{
+      width:100%;
+      height:45px;
+      border:none;
+      background:none;
+      cursor:pointer;
+    }
+
+    input[type="range"]{
+      width:100%;
+    }
+
+    .status{
+      margin-top:10px;
+      padding:10px;
+      border-radius:12px;
+      background:#111;
+      border:1px solid #333;
+      font-weight:bold;
+      text-align:center;
+    }
+
+    .hint{
+      margin-top:10px;
+      font-size:13px;
+      color:#999;
+      line-height:1.5;
+    }
+  </style>
+</head>
+<body>
+
+<canvas id="drawCanvas"></canvas>
+<video id="video" autoplay playsinline></video>
+
+<div class="ui">
+  <h2>Air Drawing</h2>
+
+  <div class="control">
+    <label>Brush Color</label>
+    <input type="color" id="colorPicker" value="#00ffff">
+  </div>
+
+  <div class="control">
+    <label>Brush Thickness</label>
+    <input type="range" id="brushSize" min="2" max="40" value="10">
+  </div>
+
+  <div class="control">
+    <label>OCR Language</label>
+    <select id="ocrLanguage" style="
+      width:100%;
+      padding:10px;
+      border-radius:10px;
+      border:1px solid #333;
+      background:#111;
+      color:white;
+      font-size:14px;
+      cursor:pointer;
+    ">
+      <option value="eng">English</option>
+      <option value="hin">Hindi</option>
+      <option value="eng+hin">English + Hindi</option>
+    </select>
+  </div>
+
+  <div class="control">
+    <button id="scanText" style="
+      width:100%;
+      padding:11px;
+      border:none;
+      border-radius:10px;
+      background:#00ffff;
+      color:#000;
+      font-weight:bold;
+      cursor:pointer;
+      font-size:14px;
+    ">Scan Text from Camera</button>
+  </div>
+
+  <div class="status" id="status">
+    Loading...
+  </div>
+
+  <div class="hint">
+    ☝ One finger → Draw<br>
+    ✋ Open palm → Erase<br>
+    ✊ Closed fist → Pause
+  </div>
+
+  <div id="ocrResult" style="
+    display:none;
+    margin-top:10px;
+    padding:10px;
+    border-radius:12px;
+    background:#111;
+    border:1px solid #333;
+    color:#00ffff;
+    font-size:13px;
+    line-height:1.5;
+    max-height:120px;
+    overflow:auto;
+    white-space:pre-wrap;
+  "></div>
+</div>
+
+<!-- MediaPipe -->
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<script>
+const canvas = document.getElementById("drawCanvas");
+const ctx = canvas.getContext("2d");
+
+const video = document.getElementById("video");
+
+const colorPicker = document.getElementById("colorPicker");
+const brushSize = document.getElementById("brushSize");
+const statusBox = document.getElementById("status");
+const scanTextButton = document.getElementById("scanText");
+const ocrLanguage = document.getElementById("ocrLanguage");
+const ocrResult = document.getElementById("ocrResult");
+
+let isScanningText = false;
+
+canvas.width = window.innerWidth;
+canvas.height = window.innerHeight;
+
+window.addEventListener("resize", () => {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+});
+
+let lastX = null;
+let lastY = null;
+
+function neonLine(x1, y1, x2, y2, color, width) {
+  ctx.strokeStyle = color;
+  ctx.lineWidth = width;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+
+  ctx.shadowBlur = 20;
+  ctx.shadowColor = color;
+
+  ctx.beginPath();
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+}
+
+function clearArea(x, y, size = 80) {
+  ctx.save();
+  ctx.globalCompositeOperation = "destination-out";
+
+  const gradient = ctx.createRadialGradient(
+    x, y, 10,
+    x, y, size
+  );
+
+  gradient.addColorStop(0, "rgba(0,0,0,1)");
+  gradient.addColorStop(1, "rgba(0,0,0,0)");
+
+  ctx.fillStyle = gradient;
+
+  ctx.beginPath();
+  ctx.arc(x, y, size, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.restore();
+}
+
+function fingerUp(tip, pip){
+  return tip.y < pip.y;
+}
+
+function detectGesture(landmarks){
+
+  const index = fingerUp(landmarks[8], landmarks[6]);
+  const middle = fingerUp(landmarks[12], landmarks[10]);
+  const ring = fingerUp(landmarks[16], landmarks[14]);
+  const pinky = fingerUp(landmarks[20], landmarks[18]);
+
+  const total = [index,middle,ring,pinky].filter(v=>v).length;
+
+  if(total === 1 && index){
+    return "draw";
+  }
+
+  if(total >= 4){
+    return "erase";
+  }
+
+  if(total === 0){
+    return "pause";
+  }
+
+  return "pause";
+}
+
+
+let ocrWorker = null;
+let loadedOCRLanguage = null;
+
+async function getOCRWorker(language){
+
+  // If the selected language changed, make a worker for that language.
+  if(ocrWorker && loadedOCRLanguage === language){
+    return ocrWorker;
+  }
+
+  if(ocrWorker){
+    try{
+      await ocrWorker.terminate();
+    }catch(e){}
+    ocrWorker = null;
+  }
+
+  statusBox.innerText = "LOADING OCR...";
+
+  ocrWorker = await Tesseract.createWorker(language, 1, {
+    logger: (info) => {
+
+      if(info.status === "loading language model" ||
+         info.status === "loading tesseract core"){
+
+        statusBox.innerText =
+          "LOADING OCR " +
+          Math.round((info.progress || 0) * 100) + "%";
+      }
+
+      if(info.status === "recognizing text"){
+
+        statusBox.innerText =
+          "READING TEXT " +
+          Math.round((info.progress || 0) * 100) + "%";
+      }
+    }
+  });
+
+  // PSM 11 = sparse text; useful when the camera sees a document
+  // or several separate lines instead of one perfect paragraph.
+  await ocrWorker.setParameters({
+    tessedit_pageseg_mode: "11",
+    preserve_interword_spaces: "1"
+  });
+
+  loadedOCRLanguage = language;
+
+  return ocrWorker;
+}
+
+
+function makeOCRImages(){
+
+  const sourceWidth = video.videoWidth;
+  const sourceHeight = video.videoHeight;
+
+  /*
+    Use the real camera frame, not the mirrored CSS preview.
+    The preview is mirrored only for the user; the actual video
+    pixels remain normal, which is what OCR needs.
+  */
+  const scale = 2;
+
+  const baseCanvas = document.createElement("canvas");
+  baseCanvas.width = sourceWidth * scale;
+  baseCanvas.height = sourceHeight * scale;
+
+  const baseCtx = baseCanvas.getContext("2d", {
+    willReadFrequently: true
+  });
+
+  baseCtx.imageSmoothingEnabled = true;
+  baseCtx.drawImage(
+    video,
+    0,
+    0,
+    baseCanvas.width,
+    baseCanvas.height
+  );
+
+  const image = baseCtx.getImageData(
+    0,
+    0,
+    baseCanvas.width,
+    baseCanvas.height
+  );
+
+  // Convert to grayscale first.
+  const gray = new Uint8ClampedArray(
+    baseCanvas.width * baseCanvas.height
+  );
+
+  let sum = 0;
+
+  for(let i = 0, p = 0; i < image.data.length; i += 4, p++){
+
+    const value =
+      (0.299 * image.data[i]) +
+      (0.587 * image.data[i + 1]) +
+      (0.114 * image.data[i + 2]);
+
+    gray[p] = value;
+    sum += value;
+  }
+
+  // Otsu-like threshold from the current frame.
+  const average = sum / gray.length;
+
+  let darkSum = 0;
+  let darkCount = 0;
+
+  for(const value of gray){
+
+    if(value < average){
+      darkSum += value;
+      darkCount++;
+    }
+  }
+
+  const darkAverage =
+    darkCount ? darkSum / darkCount : average;
+
+  const threshold =
+    Math.max(90, Math.min(190, (average + darkAverage) / 2));
+
+  // Variant 1: grayscale with contrast enhancement.
+  const grayCanvas = document.createElement("canvas");
+  grayCanvas.width = baseCanvas.width;
+  grayCanvas.height = baseCanvas.height;
+
+  const grayCtx = grayCanvas.getContext("2d");
+  const grayImage = grayCtx.createImageData(
+    baseCanvas.width,
+    baseCanvas.height
+  );
+
+  for(let p = 0, i = 0; p < gray.length; p++, i += 4){
+
+    // Increase contrast around the threshold.
+    let v = gray[p];
+    v = ((v - threshold) * 1.7) + 128;
+    v = Math.max(0, Math.min(255, v));
+
+    grayImage.data[i] = v;
+    grayImage.data[i + 1] = v;
+    grayImage.data[i + 2] = v;
+    grayImage.data[i + 3] = 255;
+  }
+
+  grayCtx.putImageData(grayImage, 0, 0);
+
+  // Variant 2: clean black/white image.
+  const binaryCanvas = document.createElement("canvas");
+  binaryCanvas.width = baseCanvas.width;
+  binaryCanvas.height = baseCanvas.height;
+
+  const binaryCtx = binaryCanvas.getContext("2d");
+  const binaryImage = binaryCtx.createImageData(
+    baseCanvas.width,
+    baseCanvas.height
+  );
+
+  for(let p = 0, i = 0; p < gray.length; p++, i += 4){
+
+    const v = gray[p] < threshold ? 0 : 255;
+
+    binaryImage.data[i] = v;
+    binaryImage.data[i + 1] = v;
+    binaryImage.data[i + 2] = v;
+    binaryImage.data[i + 3] = 255;
+  }
+
+  binaryCtx.putImageData(binaryImage, 0, 0);
+
+  return [grayCanvas, binaryCanvas];
+}
+
+
+function cleanOCRText(text){
+
+  return text
+    .replace(/\r/g, "")
+    .split("\n")
+    .map(line => line.replace(/\s+/g, " ").trim())
+    .filter(line => line.length > 0)
+    .join("\n")
+    .trim();
+}
+
+
+function drawDetectedText(text){
+
+  // Print OCR result clearly in the main black canvas area,
+  // instead of starting underneath the left-side control panel.
+  ctx.save();
+
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+
+  ctx.shadowBlur = 18;
+  ctx.shadowColor = colorPicker.value;
+  ctx.fillStyle = colorPicker.value;
+
+  const lines = text.split("\n").filter(line => line.trim());
+
+  const fontSize = 34;
+  const lineHeight = 48;
+
+  ctx.font = "bold " + fontSize + "px Arial";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "center";
+
+  // Keep the text in the open black area, to the right of the UI panel.
+  const leftSpace = 330;
+  const rightSpace = 40;
+
+  const availableWidth =
+    Math.max(300, canvas.width - leftSpace - rightSpace);
+
+  const centerX =
+    leftSpace + (availableWidth / 2);
+
+  // Wrap long OCR lines so they stay inside the black area.
+  const wrappedLines = [];
+
+  for(const line of lines){
+
+    let current = "";
+
+    for(const char of line){
+
+      const test = current + char;
+
+      if(ctx.measureText(test).width > availableWidth){
+
+        if(current){
+          wrappedLines.push(current);
+        }
+
+        current = char;
+
+      }else{
+
+        current = test;
+      }
+    }
+
+    if(current){
+      wrappedLines.push(current);
+    }
+  }
+
+  // Start around the vertical center.
+  let startY =
+    (canvas.height / 2) -
+    ((wrappedLines.length - 1) * lineHeight / 2);
+
+  for(const line of wrappedLines){
+
+    ctx.fillText(
+      line,
+      centerX,
+      startY
+    );
+
+    startY += lineHeight;
+  }
+
+  ctx.restore();
+}
+
+
+async function scanTextFromCamera(){
+
+  if(isScanningText){
+    return;
+  }
+
+  if(!video.videoWidth || !video.videoHeight){
+
+    statusBox.innerText = "CAMERA NOT READY";
+    return;
+  }
+
+  isScanningText = true;
+  lastX = null;
+  lastY = null;
+
+  statusBox.innerText = "CAPTURING TEXT...";
+  scanTextButton.disabled = true;
+  scanTextButton.innerText = "Scanning...";
+
+  try{
+
+    const language = ocrLanguage.value;
+
+    const worker = await getOCRWorker(language);
+
+    statusBox.innerText = "PROCESSING CAMERA IMAGE...";
+
+    const images = makeOCRImages();
+
+    let bestText = "";
+    let bestConfidence = -1;
+
+    /*
+      OCR is run on two differently processed versions.
+      We keep whichever result has the higher confidence.
+    */
+    for(let i = 0; i < images.length; i++){
+
+      statusBox.innerText =
+        "READING TEXT " + (i + 1) + "/2...";
+
+      const result = await worker.recognize(images[i]);
+
+      const textResult =
+        cleanOCRText(result.data.text || "");
+
+      const confidence =
+        Number(result.data.confidence || 0);
+
+      if(textResult.length > 0 &&
+         confidence > bestConfidence){
+
+        bestText = textResult;
+        bestConfidence = confidence;
+      }
+    }
+
+    if(!bestText){
+
+      ocrResult.style.display = "block";
+      ocrResult.innerText = "No text found.";
+      statusBox.innerText =
+        "NO TEXT FOUND - HOLD PAPER CLOSER";
+
+      return;
+    }
+
+    // Show exactly what OCR detected.
+    ocrResult.style.display = "block";
+    ocrResult.innerText = bestText;
+
+    // Print the detected text onto the SAME existing drawing canvas.
+    drawDetectedText(bestText);
+
+    statusBox.innerText =
+      "TEXT PRINTED ON SCREEN (" + Math.round(bestConfidence) + "%)";
+
+  }catch(error){
+
+    console.error("OCR Error:", error);
+
+    statusBox.innerText =
+      "OCR ERROR - CHECK INTERNET";
+
+  }finally{
+
+    isScanningText = false;
+    scanTextButton.disabled = false;
+    scanTextButton.innerText = "Scan Text from Camera";
+  }
+}
+
+
+scanTextButton.addEventListener("click", scanTextFromCamera);
+
+const hands = new Hands({
+  locateFile: (file) => {
+    return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+  }
+});
+
+hands.setOptions({
+  maxNumHands: 1,
+  modelComplexity: 1,
+  minDetectionConfidence: 0.7,
+  minTrackingConfidence: 0.7
+});
+
+hands.onResults((results) => {
+
+  if(isScanningText){
+    return;
+  }
+
+  if (!results.multiHandLandmarks.length) {
+    lastX = null;
+    lastY = null;
+    statusBox.innerText = "No Hand Detected";
+    return;
+  }
+
+  const landmarks = results.multiHandLandmarks[0];
+
+  const gesture = detectGesture(landmarks);
+
+  const indexTip = landmarks[8];
+
+  const x = canvas.width - (indexTip.x * canvas.width);
+  const y = indexTip.y * canvas.height;
+
+  if(gesture === "draw"){
+
+    statusBox.innerText = "DRAW MODE";
+
+    if(lastX !== null && lastY !== null){
+      neonLine(
+        lastX,
+        lastY,
+        x,
+        y,
+        colorPicker.value,
+        parseInt(brushSize.value)
+      );
+    }
+
+    lastX = x;
+    lastY = y;
+  }
+
+  else if(gesture === "erase"){
+
+    statusBox.innerText = "ERASE MODE";
+
+    clearArea(x, y);
+
+    lastX = null;
+    lastY = null;
+  }
+
+  else{
+
+    statusBox.innerText = "PAUSE MODE";
+
+    lastX = null;
+    lastY = null;
+  }
+});
+
+const camera = new Camera(video, {
+  onFrame: async () => {
+    await hands.send({ image: video });
+  },
+  width: 1280,
+  height: 720
+});
+
+camera.start();
+
+ctx.fillStyle = "#050505";
+ctx.fillRect(0,0,canvas.width,canvas.height);
+</script>
+
+</body>
+</html>
