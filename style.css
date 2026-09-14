@@ -431,7 +431,7 @@ nav a:hover {
     transform: translateY(-4px);
     box-shadow: 0 10px 25px rgba(139, 92, 246, 0.3);
 }
-/* Contact Form */
+
 .contact-form {
   max-width: 650px;
   margin: 40px auto 0;
